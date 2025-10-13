@@ -14,6 +14,7 @@ from app.config import settings
 from app.handlers import setup_routers
 from app.middlewares import setup_middlewares
 from app.database import db
+from app.utils.bot_commands import setup_bot_commands
 
 
 async def setup_bot() -> tuple[Bot, Dispatcher]:
@@ -55,6 +56,14 @@ async def on_startup(bot: Bot) -> None:
     except Exception as e:
         logger.error(f"❌ Failed to initialize database: {e}")
         sys.exit(1)
+    
+    # Настраиваем команды бота
+    try:
+        await setup_bot_commands(bot)
+        logger.info("✅ Bot commands configured successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to setup bot commands: {e}")
+        # Продолжаем работу даже если команды не удалось установить
     
     bot_info = await bot.get_me()
     logger.info(f"🚀 Bot @{bot_info.username} started successfully!")

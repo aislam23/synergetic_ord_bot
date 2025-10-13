@@ -299,4 +299,453 @@ async def cancel_any_state(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("❌ Операция отменена")
     else:
-        await message.answer("ℹ️ Нет активных операций для отмены") 
+        await message.answer("ℹ️ Нет активных операций для отмены")
+
+
+# Хендлеры для управления сотрудниками
+
+@router.callback_query(F.data == "admin_employees")
+async def show_employees_menu(callback: CallbackQuery):
+    """Показ меню управления сотрудниками"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    await callback.message.edit_text(
+        "👥 <b>Управление сотрудниками</b>\n\n"
+        "Выберите действие:",
+        reply_markup=AdminKeyboards.employees_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_back")
+async def back_to_admin_menu(callback: CallbackQuery, bot: Bot):
+    """Возврат в главное меню админа"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    # Получаем статистику
+    stats = await db.get_bot_stats()
+    if not stats:
+        stats = await db.update_bot_stats()
+    
+    total_users = await db.get_users_count()
+    active_users = await db.get_active_users_count()
+    last_restart = stats.last_restart.strftime("%d.%m.%Y %H:%M:%S")
+    
+    text = f"""
+🔧 <b>Админская панель</b>
+
+📊 <b>Статистика бота:</b>
+👥 Всего пользователей: <b>{total_users}</b>
+✅ Активных пользователей: <b>{active_users}</b>
+🟢 Статус: <b>{stats.status}</b>
+🕐 Последний запуск: <b>{last_restart}</b>
+
+Выберите действие:
+"""
+    
+    await callback.message.edit_text(
+        text=text,
+        reply_markup=AdminKeyboards.main_admin_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "employees_list")
+async def show_employees_list(callback: CallbackQuery):
+    """Показ списка сотрудников"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    # Получаем всех пользователей
+    all_users = await db.get_all_users()
+    
+    if not all_users:
+        await callback.message.edit_text(
+            "📋 <b>Список сотрудников</b>\n\n"
+            "Сотрудников пока нет.",
+            reply_markup=AdminKeyboards.employees_menu()
+        )
+        await callback.answer()
+        return
+    
+    await callback.message.edit_text(
+        "📋 <b>Список сотрудников</b>\n\n"
+        "Выберите сотрудника для просмотра карточки:",
+        reply_markup=AdminKeyboards.employees_list_keyboard(all_users)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("employee_view:"))
+async def show_employee_card(callback: CallbackQuery):
+    """Показ карточки сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Сотрудник не найден", show_alert=True)
+        return
+    
+    # Формируем информацию о сотруднике
+    role_text = "👨‍💼 Администратор" if user.role == "admin" else "👤 Сотрудник"
+    status_text = "🔴 Заблокирован" if user.is_blocked else "🟢 Активен"
+    full_name = user.full_name or "Не указано"
+    username = f"@{user.username}" if user.username else "Не указан"
+    created_date = user.created_at.strftime("%d.%m.%Y %H:%M")
+    
+    # Получаем информацию о том, кто пригласил
+    invited_by_text = "Не указано"
+    if user.invited_by:
+        inviter = await db.get_user(user.invited_by)
+        if inviter:
+            invited_by_text = inviter.full_name or inviter.first_name or f"ID: {inviter.id}"
+    
+    text = f"""
+👤 <b>Карточка сотрудника</b>
+
+<b>ФИО:</b> {full_name}
+<b>Username:</b> {username}
+<b>Telegram ID:</b> <code>{user.id}</code>
+
+<b>Роль:</b> {role_text}
+<b>Статус:</b> {status_text}
+
+<b>Пригласил:</b> {invited_by_text}
+<b>Дата добавления:</b> {created_date}
+
+Выберите действие:
+"""
+    
+    await callback.message.edit_text(
+        text=text,
+        reply_markup=AdminKeyboards.employee_card_keyboard(user_id, user.is_blocked)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "employee_add")
+async def start_add_employee(callback: CallbackQuery, state: FSMContext):
+    """Начало добавления сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    await state.set_state(AdminStates.add_employee_name)
+    
+    await callback.message.edit_text(
+        "➕ <b>Добавление сотрудника</b>\n\n"
+        "Введите ФИО сотрудника:",
+        reply_markup=AdminKeyboards.cancel_keyboard("admin_employees")
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminStates.add_employee_name))
+async def receive_employee_name(message: Message, state: FSMContext, bot: Bot):
+    """Получение ФИО сотрудника и генерация ссылки"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    full_name = message.text.strip()
+    
+    # Генерируем уникальный код приглашения
+    import secrets
+    invite_code = secrets.token_urlsafe(16)
+    
+    # Создаем пригласительную ссылку
+    invite_link = await db.create_invite_link(
+        code=invite_code,
+        created_by=message.from_user.id,
+        target_role="employee",
+        full_name=full_name
+    )
+    
+    # Формируем ссылку
+    bot_username = settings.bot_username or (await bot.get_me()).username
+    invite_url = f"https://t.me/{bot_username}?start={invite_code}"
+    
+    await message.answer(
+        f"✅ <b>Пригласительная ссылка создана!</b>\n\n"
+        f"<b>ФИО:</b> {full_name}\n"
+        f"<b>Ссылка:</b> <code>{invite_url}</code>\n\n"
+        f"⚠️ Эта ссылка одноразовая и может быть использована только один раз.\n\n"
+        f"Отправьте эту ссылку сотруднику для регистрации в боте.",
+        reply_markup=AdminKeyboards.employees_menu()
+    )
+    
+    await state.clear()
+
+
+@router.callback_query(F.data == "admin_add")
+async def start_add_admin(callback: CallbackQuery, state: FSMContext):
+    """Начало добавления администратора"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    await state.set_state(AdminStates.add_admin_name)
+    
+    await callback.message.edit_text(
+        "👨‍💼 <b>Добавление администратора</b>\n\n"
+        "Введите ФИО администратора:",
+        reply_markup=AdminKeyboards.cancel_keyboard("admin_employees")
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminStates.add_admin_name))
+async def receive_admin_name(message: Message, state: FSMContext, bot: Bot):
+    """Получение ФИО администратора и генерация ссылки"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    full_name = message.text.strip()
+    
+    # Генерируем уникальный код приглашения
+    import secrets
+    invite_code = secrets.token_urlsafe(16)
+    
+    # Создаем пригласительную ссылку для админа
+    invite_link = await db.create_invite_link(
+        code=invite_code,
+        created_by=message.from_user.id,
+        target_role="admin",
+        full_name=full_name
+    )
+    
+    # Формируем ссылку
+    bot_username = settings.bot_username or (await bot.get_me()).username
+    invite_url = f"https://t.me/{bot_username}?start={invite_code}"
+    
+    await message.answer(
+        f"✅ <b>Пригласительная ссылка для администратора создана!</b>\n\n"
+        f"<b>ФИО:</b> {full_name}\n"
+        f"<b>Ссылка:</b> <code>{invite_url}</code>\n\n"
+        f"⚠️ Эта ссылка одноразовая и может быть использована только один раз.\n\n"
+        f"Отправьте эту ссылку новому администратору для регистрации в боте.",
+        reply_markup=AdminKeyboards.employees_menu()
+    )
+    
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("employee_block:"))
+async def block_employee(callback: CallbackQuery, bot: Bot):
+    """Блокировка сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    
+    # Блокируем пользователя
+    user = await db.block_user(user_id)
+    
+    if user:
+        await callback.answer("✅ Сотрудник заблокирован", show_alert=True)
+        
+        # Отправляем уведомление сотруднику
+        try:
+            admin_name = callback.from_user.full_name or callback.from_user.username or "Администратор"
+            await bot.send_message(
+                user_id,
+                f"🚫 <b>Ваш доступ к боту был заблокирован</b>\n\n"
+                f"Администратор <b>{admin_name}</b> заблокировал ваш доступ к боту.\n\n"
+                f"Для получения дополнительной информации обратитесь к администратору."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление о блокировке пользователю {user_id}: {e}")
+        
+        # Обновляем карточку
+        await show_employee_card(callback)
+    else:
+        await callback.answer("❌ Ошибка блокировки", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("employee_unblock:"))
+async def unblock_employee(callback: CallbackQuery, bot: Bot):
+    """Разблокировка сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    
+    # Разблокируем пользователя
+    user = await db.unblock_user(user_id)
+    
+    if user:
+        await callback.answer("✅ Сотрудник разблокирован", show_alert=True)
+        
+        # Отправляем уведомление сотруднику
+        try:
+            admin_name = callback.from_user.full_name or callback.from_user.username or "Администратор"
+            await bot.send_message(
+                user_id,
+                f"✅ <b>Ваш доступ к боту восстановлен</b>\n\n"
+                f"Администратор <b>{admin_name}</b> разблокировал ваш доступ к боту.\n\n"
+                f"Теперь вы снова можете использовать все функции бота."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление о разблокировке пользователю {user_id}: {e}")
+        
+        # Обновляем карточку
+        await show_employee_card(callback)
+    else:
+        await callback.answer("❌ Ошибка разблокировки", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("employee_edit:"))
+async def start_edit_employee(callback: CallbackQuery, state: FSMContext):
+    """Начало редактирования ФИО сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    
+    await state.update_data(edit_user_id=user_id)
+    await state.set_state(AdminStates.edit_employee_name)
+    
+    await callback.message.edit_text(
+        "✏️ <b>Редактирование ФИО</b>\n\n"
+        "Введите новое ФИО сотрудника:",
+        reply_markup=AdminKeyboards.cancel_keyboard(f"employee_view:{user_id}")
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminStates.edit_employee_name))
+async def receive_edited_name(message: Message, state: FSMContext):
+    """Получение нового ФИО сотрудника"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    user_id = data.get("edit_user_id")
+    new_name = message.text.strip()
+    
+    # Обновляем ФИО
+    user = await db.update_user_full_name(user_id, new_name)
+    
+    if user:
+        await message.answer(
+            f"✅ ФИО успешно обновлено на: <b>{new_name}</b>",
+            reply_markup=AdminKeyboards.employee_card_keyboard(user_id, user.is_blocked)
+        )
+    else:
+        await message.answer("❌ Ошибка обновления ФИО")
+    
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("employee_reinvite:"))
+async def reinvite_employee(callback: CallbackQuery, bot: Bot):
+    """Перевыпуск пригласительной ссылки"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Сотрудник не найден", show_alert=True)
+        return
+    
+    # Генерируем новый код приглашения
+    import secrets
+    invite_code = secrets.token_urlsafe(16)
+    
+    # Создаем новую пригласительную ссылку
+    invite_link = await db.create_invite_link(
+        code=invite_code,
+        created_by=callback.from_user.id,
+        target_role=user.role,
+        full_name=user.full_name
+    )
+    
+    # Формируем ссылку
+    bot_username = settings.bot_username or (await bot.get_me()).username
+    invite_url = f"https://t.me/{bot_username}?start={invite_code}"
+    
+    await callback.message.answer(
+        f"🔗 <b>Новая пригласительная ссылка создана!</b>\n\n"
+        f"<b>ФИО:</b> {user.full_name or 'Не указано'}\n"
+        f"<b>Ссылка:</b> <code>{invite_url}</code>\n\n"
+        f"⚠️ Эта ссылка одноразовая и может быть использована только один раз."
+    )
+    
+    await callback.answer("✅ Ссылка перевыпущена")
+
+
+@router.callback_query(F.data.startswith("employee_delete_confirm:"))
+async def confirm_delete_employee(callback: CallbackQuery):
+    """Подтверждение удаления сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Сотрудник не найден", show_alert=True)
+        return
+    
+    display_name = user.full_name or user.first_name or user.username or f"ID: {user.id}"
+    
+    await callback.message.edit_text(
+        f"⚠️ <b>Подтверждение удаления</b>\n\n"
+        f"Вы действительно хотите удалить сотрудника:\n"
+        f"<b>{display_name}</b>?\n\n"
+        f"Это действие нельзя отменить!",
+        reply_markup=AdminKeyboards.employee_delete_confirm(user_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("employee_delete:"))
+async def delete_employee(callback: CallbackQuery, bot: Bot):
+    """Удаление сотрудника"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора")
+        return
+    
+    user_id = int(callback.data.split(":")[1])
+    
+    # Отправляем уведомление сотруднику ДО удаления
+    try:
+        admin_name = callback.from_user.full_name or callback.from_user.username or "Администратор"
+        await bot.send_message(
+            user_id,
+            f"🗑 <b>Ваш доступ к боту был удален</b>\n\n"
+            f"Администратор <b>{admin_name}</b> удалил вас из системы.\n\n"
+            f"Для получения доступа к боту обратитесь к администратору за новой пригласительной ссылкой."
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить уведомление об удалении пользователю {user_id}: {e}")
+    
+    # Удаляем пользователя
+    success = await db.delete_user(user_id)
+    
+    if success:
+        await callback.message.edit_text(
+            "✅ <b>Сотрудник успешно удален</b>",
+            reply_markup=AdminKeyboards.employees_menu()
+        )
+        await callback.answer()
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True) 

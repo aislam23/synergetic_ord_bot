@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     redis_db: int = Field(0, alias="REDIS_DB")
     redis_password: str = Field("", alias="REDIS_PASSWORD")
     
+    # Mediascout API settings
+    mediascout_api_url: str = Field("https://lk.mediascout.ru/webapi", alias="MEDIASCOUT_API_URL")
+    mediascout_login: str = Field(..., alias="MEDIASCOUT_LOGIN")
+    mediascout_password: str = Field(..., alias="MEDIASCOUT_PASSWORD")
+    
     # Environment
     env: str = Field("development", alias="ENV")
     
