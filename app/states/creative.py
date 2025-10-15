@@ -16,6 +16,9 @@ class CreativeStates(StatesGroup):
     # Ввод текста (для форм с текстом)
     enter_text = State()
     
+    # Ввод целевых ссылок (необязательно)
+    enter_advertiser_urls = State()
+    
     # Выбор кода ККТУ
     select_kktu = State()
     

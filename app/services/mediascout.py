@@ -73,7 +73,8 @@ class MediascoutAPI:
         media_base64: Optional[str] = None,
         media_filename: Optional[str] = None,
         text_data: Optional[str] = None,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        advertiser_urls: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Создать креатив саморекламы
@@ -85,6 +86,7 @@ class MediascoutAPI:
             media_filename: Имя медиа-файла (опционально)
             text_data: Текстовые данные (опционально)
             description: Описание креатива (опционально, обязательно для 30.15.1)
+            advertiser_urls: Целевые ссылки (опционально)
             
         Returns:
             Dict с результатом (erid, id, и т.д.) или ошибкой
@@ -105,6 +107,10 @@ class MediascoutAPI:
         # Добавляем описание, если требуется для кода ККТУ 30.15.1
         if kktu_code == "30.15.1" and description:
             payload["description"] = description
+        
+        # Добавляем целевые ссылки, если есть
+        if advertiser_urls:
+            payload["advertiserUrls"] = advertiser_urls
         
         # Добавляем медиа-данные, если есть
         if media_base64 and media_filename:
